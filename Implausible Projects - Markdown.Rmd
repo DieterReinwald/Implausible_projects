@@ -1,0 +1,2458 @@
+---
+title: "Analysis of implausible projects"
+author: "Dieter Reinwald"
+date: '2022'
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: 2
+    number_sections: yes
+---
+
+```{r setup, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = FALSE, fig.height = 2.5, fig.width = 3.5, fig.align = "center", message = FALSE, warning = FALSE)
+
+##############install and import packages ##############
+# Load required packages
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org", dependencies = TRUE)
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org", dependencies = TRUE)
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org", dependencies = TRUE)
+if(!require(randomForest)) install.packages("randomForest", repos = "http://cran.us.r-project.org", dependencies = TRUE)
+if(!require(naniar)) install.packages("naniar", repos = "http://cran.us.r-project.org", dependencies = TRUE)
+if(!require(timeR)) install.packages("timeR", repos = "http://cran.us.r-project.org", dependencies = TRUE)
+if(!require(stringi)) install.packages("stringi", repos = "http://cran.us.r-project.org", dependencies = TRUE)
+if(!require(scales)) install.packages("scales", repos = "http://cran.us.r-project.org", dependencies = TRUE)
+if(!require(gridExtra)) install.packages("gridExtra", repos = "http://cran.us.r-project.org", dependencies = TRUE)
+if(!require(udpipe)) install.packages("udpipe", repos = "http://cran.us.r-project.org", dependencies = TRUE)
+if(!require(klaR)) install.packages("klaR", repos = "http://cran.us.r-project.org", dependencies = TRUE)
+if(!require(e1071)) install.packages("e1071", repos = "http://cran.us.r-project.org", dependencies = TRUE)
+if(!require(ranger)) install.packages("ranger", repos = "http://cran.us.r-project.org", dependencies = TRUE)
+if(!require(boot)) install.packages("boot", repos = "http://cran.us.r-project.org", dependencies = TRUE)
+if(!require(Rfast)) install.packages("Rfast", repos = "http://cran.us.r-project.org", dependencies = TRUE)
+if(!require(pander)) install.packages("pander", repos = "http://cran.us.r-project.org", dependencies = TRUE)
+library(tidyverse)
+library(data.table)
+library(caret)
+library(randomForest)
+library(dplyr)
+library(lubridate)
+library(stringr)
+library(bpa)
+library(e1071)
+library(rpart)
+library(boot)
+library(ggplot2)
+library(readr)
+library(naniar)
+library(timeR)
+library(stringi)
+library(scales)
+library(gridExtra)
+library(corrplot)
+library(udpipe)
+library(knitr)
+library(pROC)
+library(ranger)
+library(rmarkdown)
+library(pander)
+
+# define global font size of ggplot objects
+global_size <- 9
+```
+
+\newpage
+
+# Executive summary
+
+In highly competitive markets, customer loyalty and customer satisfaction are two essential aspects of successful businesses. One aspect is correct invoices issued to the customer. If they are correct, the customer will pay for the products and services without complaint. However, if they are incorrect or seem implausible to the customer, it can lead from complaint and refusal to pay to litigation. This matter is aggravated when, due to the high number of invoices, they are no longer generated manually but automatically and can no longer be checked by people. The impact on the company's reputation is critical and can lead to significant damage in the short but also in the long term (social media, word of mouth effects etc.)
+
+The project presented here aims to distinguish plausible from implausible service project invoices on the basis of predictors. By this, a manual check can already take place before invoicing and thus avoid dissatisfaction. In order to do this, we will analyze data of all service projects and service project invoices from the last couple years. The invoices that have been classified as implausible are from year 2015 to 2020, the invoices to be predicted come from year 2021.
+
+The company that we will use for this service project in invoice prediction is a European supplier of shading solutions with about 200,000 project invoices per year. It not only produces and sells these products, but also provides after-sales services, i.e. repair and maintenance. We will focus on this in the following.
+
+We will train, test, and compare different classification models and apply the best one to a validation set in order to predict implausible projects and invoices.
+
+\newpage
+
+# Overview
+
+The following steps will be performed to reach the goal:
+
+1. Import data: The required data for projects, invoices and already flagged projects (based on business plausibility checks) is imported.
+
+2. Explore, clean and visualize data: We start with a general exploratory data analysis and will continue by visualizing the data by use of histograms, bar charts, smooth plots and a correlation analysis. We will make some preprocess steps for the data as well.
+
+3. Modeling approach: We take the steps needed for training and testing, i.e. reduction of the data set by unneeded variables and split of the data into train, test and validation set.
+
+4. Train and compare different models: In total, we use four different models to identify the best performing model. These are naive bayes, logistic regression, decision tree, and random forest. The different performances are directly discussed.
+
+5. Model prediction: The best two models are selected and applied on the validation set to predict implausible projects for 2021. Although, we present and discuss the different model results after each analysis briefly.
+
+6. Conclusion: Finally, we make a brief summary of the report, its limitations and show potential approaches and ideas for future work.
+
+# Import data
+```{r create timer object}
+#################################################
+#Create timer object to track duration for different sections
+mytimer <- createTimer(verbose = FALSE)
+```
+
+```{r start timer import data}
+# Start timer
+mytimer$start("Import data")
+```
+
+For importing the data, we first load it from the publicly available GitHub website [Implausible_projects](https://github.com/DieterReinwald/Implausible_projects/tree/main/data). The data provided by the company has been anonymized and shared on a web site in different files:
+
+1. **projects.csv** - this file represents the master data of the service projects including information like project id, sales channel, create date etc.
+
+2. **invoices_xxx.csv** - these files show the invoice details for the service projects like invoice date, due date, net amount, tax, gross amount and some categorical data (e.g. type, employee or item details) for the years 2015 to 2021. These invoices are linked to the projects data via the variable proj_invoice_projid. The invoice files are separate for each year, will be merged and then left joined to the projects file to combine all data in one table. As a rule, one invoice exists per project. However, there are cases when there is more than one invoice per project.
+
+3. **flagged_projects.csv** - in this file we see the project ids that have been flagged implausible by business experts.
+
+We only take the unique values for projects, invoices and flagged projects.
+
+```{r import data}
+##############################
+# import data
+
+# service projects data
+urlfile_projects = "https://raw.githubusercontent.com/DieterReinwald/Implausible_projects/main/data/projects.csv"
+projects <- read_csv2(url(urlfile_projects))
+
+# service project invoices data 2015 to 2021
+urlfile_inv2015 <- "https://raw.githubusercontent.com/DieterReinwald/Implausible_projects/main/data/invoices_2015.csv"
+invoices_2015 <- read_csv2(url(urlfile_inv2015))
+
+urlfile_inv2016 <- "https://raw.githubusercontent.com/DieterReinwald/Implausible_projects/main/data/invoices_2016.csv"
+invoices_2016 <- read_csv2(url(urlfile_inv2016))
+
+urlfile_inv2017 <- "https://raw.githubusercontent.com/DieterReinwald/Implausible_projects/main/data/invoices_2017.csv"
+invoices_2017 <- read_csv2(url(urlfile_inv2017))
+
+urlfile_inv2018 <- "https://raw.githubusercontent.com/DieterReinwald/Implausible_projects/main/data/invoices_2018.csv"
+invoices_2018 <- read_csv2(url(urlfile_inv2018))
+
+urlfile_inv2019 <- "https://raw.githubusercontent.com/DieterReinwald/Implausible_projects/main/data/invoices_2019.csv"
+invoices_2019 <- read_csv2(url(urlfile_inv2019))
+
+urlfile_inv2020 <- "https://raw.githubusercontent.com/DieterReinwald/Implausible_projects/main/data/invoices_2020.csv"
+invoices_2020 <- read_csv2(url(urlfile_inv2020))
+
+urlfile_inv2021 <- "https://raw.githubusercontent.com/DieterReinwald/Implausible_projects/main/data/invoices_2021.csv"
+invoices_2021 <- read_csv2(url(urlfile_inv2021))
+
+# merge invoice data
+invoices <- bind_rows(invoices_2015, invoices_2016, invoices_2017, invoices_2018, invoices_2019, invoices_2020, invoices_2021)
+
+# remove temp objects
+rm(invoices_2015, invoices_2016, invoices_2017, invoices_2018, invoices_2019, invoices_2020, invoices_2021)
+
+# flagged projects data
+urlfile_flagged <- "https://raw.githubusercontent.com/DieterReinwald/Implausible_projects/main/data/flagged_projects.csv"
+flagged_projects <- read_csv2(url(urlfile_flagged))
+```
+
+```{r stop timer import data}
+#Stop timer
+mytimer$stop("Import data")
+```
+
+\newpage
+# Explore, clean and visualize data
+
+```{r start timer explore clean visualize data}
+#Start timer
+mytimer$start(" Explore, clean and visualize data")
+```
+
+In this section we explore, clean and visualize the data it to gain deeper insights about potential relationships between the different variables. Additionally, we preprocess the data.
+
+## Exploratory data analysis
+
+We start with an overall analysis of the different data sets, including:
+
+- the explanation of the data structure, dimensions, and first glimpse to the data
+- the initial data types
+- the required mutations (including data type conversion)
+- the representation of the final summary
+
+### Projects data
+#### Data structure
+
+We can see that the projects data consists of the following columns:
+
+- proj_id - the unique id of the service project
+- channel - the sales channel through which the project was sold
+- correction - flag for a correction project when something went wrong in an earlier project and needs to be fixed
+- fix - flag for a fixed price project
+- project_create_date - the create date of the project in the enterprise resource planning (ERP) system
+- project_start_date - the start date of the project in the ERP system
+- project_end_date - the end date of the project in the ERP system
+- project_status - the status of the project
+- cust_account - the customer account for the project
+- invoice_account - the invoice account for the project
+- blocked_for_invoice - flag if the project is blocked for invoicing (e.g. if legal issues occurred)
+- warranty_claim - the status of the project warranty claim
+- proj_invoice_projid - the project contract id (also join element for the invoice data)
+
+The dimensions and the first rows of the data file are as follows:
+
+```{r projects - dimensions and head}
+# dimension of projects data
+dim(projects)
+
+# head of project data
+head(projects) %>% pander(split.tables = 100, style = "rmarkdown", caption = "Head data of table projects")
+```
+
+#### Initial data types
+
+The initial data types are shown in the following table.We see that the date data types have two different types (POSIXct, POSIXt).
+
+```{r projects - data types}
+# show data types 
+sapply(projects, class) %>% 
+  as.data.frame() %>% 
+  pander(split.tables = 100, style = "rmarkdown", caption = "Initial data types projects")
+```
+
+#### Mutations
+
+We recognize that project_start_date is always set to 1900-01-01 (due to unique analysis) in all cases. We remove this variable since it has no additional value for the further analysis.
+
+```{r projects - project_start_date}
+# show summary project_start_date
+projects %>% 
+  dplyr::select(project_start_date) %>% 
+  group_by(project_start_date) %>% 
+  summarise(count = n()) %>% 
+  pander()
+
+# remove project_start_date 
+ projects <- 
+   projects %>% 
+   dplyr::select(-project_start_date)
+```
+
+We also decompose the date values for project_create_date and project_end_date into year, month, and day values so that they are already available for further analyses. Additionally, we expand the project data to include the hint for flagged projects and call the new variable **flag**. We set it to 0 per default initially.
+
+```{r projects - mutation}
+# data mutation of projects
+projects <- 
+   projects %>% 
+     mutate(
+      channel = as.factor(channel),
+      correction = as.integer(correction),
+      fix = as.integer(fix),
+      project_create_date = as_date(project_create_date),
+      pcd_year = as.integer(year(project_create_date)),
+      pcd_month = as.integer(month(project_create_date)),
+      pcd_day = as.integer(wday(project_create_date)),
+      project_end_date = as_date(project_end_date),
+      ped_year = as.integer(year(project_end_date)),
+      ped_month = as.integer(month(project_end_date)),
+      ped_day = as.integer(wday(project_end_date)),
+      project_status = as.factor(project_status),
+      blocked_for_invoice = as.integer(blocked_for_invoice),
+      warranty_claim = as.integer(warranty_claim),
+      flag = as.integer(0)
+   )
+
+# show year, month, and day per date types
+projects %>% 
+  dplyr::select(pcd_year, pcd_month, pcd_day, ped_year, ped_month, ped_day) %>% 
+  head(6) %>% 
+  pander(split.tables = 100, style = "rmarkdown")
+```
+
+After adjusting the data types, we look at other anomalies in detail. For this purpose we use basic pattern analysis.
+
+- proj_id: we know that there is a particular notation pattern for so called cancellation projects. Those are projects that were created based on manual errors in advance. Since we are interested to identify only "implausible" projects we leave out these projects. The patterns of the cancellation projects are 9999999.9 and 9999999.99, i.e. they contain a "." . In total, there are 10,886 cancellation projects which is only 3.7% of all projects.
+
+```{r projects - basic pattern analysis proj_id}
+# get patterns for proj_id 
+ projects$proj_id %>% 
+  bpa(unique_only = TRUE) %>% 
+  pander()
+```
+
+```{r projects - remove cancellation projects}
+#remove cancellation projects based on pattern
+projects <- 
+  projects %>%  
+  filter(!str_detect(proj_id, '\\.'))
+```
+
+- channel: the pattern analysis also revealed that there are 129 channel entries with value "NULL" (character, not NA). Since this is a negligible proportion we filter out these rows.
+
+```{r projects - basic pattern analysis channel}
+# get pattern for channel
+projects$channel %>% bpa(unique_only = TRUE) %>% pander()
+
+# show patterns where frequency > 0 
+match_pattern(projects$channel, pattern = "AAAA", unique_only = FALSE) %>% 
+  table %>% 
+  as.data.frame() %>% 
+  filter(Freq > 0) %>%
+  pander()
+```
+
+```{r projects - remove NULL values}
+# remove NULL value from channels
+projects <- 
+  projects %>% 
+  filter(!str_detect(channel, 'NULL'))
+```
+
+#### Summary
+
+Let us see the summary of the projects data after the previous steps.
+
+```{r projects - summary after mutation}
+# data exploration projects
+summary(projects) %>% pander(split.tables = 100, style = "rmarkdown", caption = "Head data of table projects (after mutation)")
+```
+
+### Invoices data
+#### Data structure
+
+The invoices data consists of the following columns:
+
+- proj_invoice_projid - the project contract id (also join element for the project table)
+- proj_invoice_id - the id for the project invoice
+- order_account - the account for which the order was made
+- invoice_date - the date on the invoice
+- due_date - the due date on the invoice 
+- net_amount - the net amount
+- line_discount - the line discount
+- total_discount - the total discount
+- markup - additional amount for particular services (e.g. approvals, road closures)
+- tax - the tax amount 
+- gross_amount - the amount to be paid from the customer
+- weight - the weight of the line item 
+- volume - the volume of the line item 
+- invoice_create_date - the create date of the invoice
+- type - the type of the line item (employee or item)
+- category - the category of the line item 
+- empl_item_detail - detailed information to the line item
+- qty - the quantity of the line item (hours for category employee, volume of items for category items)
+- line_amount - the amount of the line item
+
+The dimensions and the first rows of the data file are as follows: 
+
+```{r invoices - dimensions and head}
+# dimension of invoices data
+dim(invoices)
+
+# head of invoices data
+head(invoices) %>% pander(split.tables = 100, style = "rmarkdown", caption = "Head data of table invoices")
+```
+
+#### Initial data types
+
+The initial data types are shown in the following. We can see that some date data types are identified correctly as date; invoice_create_date was typed as POSIXct and POSIXt.
+
+```{r invoices- data types}
+# data types
+sapply(invoices, class) %>% 
+  as.data.frame() %>% 
+  distinct() %>% 
+  pander(split.tables = 100, style = "rmarkdown", caption = "Initial data types invoices")
+```
+
+As we can see most of all variables have character as data type and and thus are not typed correctly. We correct this in the following mutation. 
+
+#### Mutation
+
+Similar to the projects data we also decompose the date values for date variables, i.e. invoice_create_date, invoice_date, and due_date into year, month, and day. In addition to adjusting the data types, we remove the variable volume since it only contains the value 0. 
+
+```{r invoices - mutation}
+# data mutation of invoices
+invoices <- 
+   invoices %>% 
+      mutate(
+        order_account = as.integer(order_account),
+        invoice_create_date = as_date(invoice_create_date),
+        icd_year = as.integer(year(invoice_create_date)),
+        icd_month = as.integer(month(invoice_create_date)),
+        icd_day = as.integer(wday(invoice_create_date)),
+        invoice_date = as_date(invoice_date), 
+        invd_year = as.integer(year(invoice_date)),
+        invd_month = as.integer(month(invoice_date)),
+        invd_day = as.integer(wday(invoice_date)),
+        due_date = as_date(due_date), 
+        dd_year = as.integer(year(due_date)),
+        dd_month = as.integer(month(due_date)),
+        dd_day = as.integer(wday(due_date)),
+        qty = as.numeric(qty),
+        line_amount = as.numeric(line_amount),
+        line_discount = as.numeric(line_discount),
+        net_amount = as.numeric(net_amount),
+        total_discount = as.numeric(total_discount),
+        markup = as.numeric(markup),
+        tax = as.numeric(tax),
+        gross_amount = as.numeric(gross_amount),
+        weight = as.numeric(weight),
+        type = as.factor(type),
+        category = as.factor(category),
+        empl_item_detail = as.factor(empl_item_detail)
+      ) %>% 
+    dplyr::select(-volume)
+
+# show year, month, and day per date types
+invoices %>% 
+  dplyr::select(icd_year, icd_month, icd_day, invd_year, invd_month, invd_day, dd_year, dd_month, dd_day) %>% 
+  head(6) %>% 
+  pander(split.tables = 100, style = "rmarkdown")
+```
+
+We also perform a pattern analysis for particular variables of the invoices data: 
+
+- proj_invoice_id: this variable is the central element for the invoice. If the entry is NULL or empty we will remove it since it does not provide any further information - it is isolated. Business experts confirmed this as data quality issue of the ERP system. In addition, we neglect the invoices with pattern "GS-" (`r invoices %>% filter(str_detect(proj_invoice_id, 'GS-')) %>% nrow()` rows); those are credit notes, i.e. corrected invoices based on incorrect ones.
+
+```{r invoices - basic pattern analysis proj_invoice_id}
+#basic pattern analysis proj_invoice_id
+invoices$proj_invoice_id %>% 
+  bpa(unique = TRUE) %>% 
+  pander()
+```
+
+- category: We remove invoices where the category is NULL (`r invoices %>% filter(str_detect(category, 'NULL')) %>% nrow()` rows) since we cannot detect any hints for these invoices on items or employee hours. This will also be further investigated by the business experts of the company.
+
+```{r invoices - remove cases from proj_invoice_id and category}
+# remove cases from proj_invoice_id and category
+invoices <- 
+  invoices %>%   
+  filter(!str_detect(proj_invoice_id, 'NULL')) %>% # remove value NULL
+  filter(!stri_isempty(proj_invoice_id) == TRUE) %>% # remove empty strings
+  filter(!str_detect(proj_invoice_id, 'GS-')) %>% # remove credit notes
+  filter(!str_detect(category, 'NULL')) # remove value NULL for category
+```
+
+- In addition, we note that the variable empl_item_detail has `r invoices %>% dplyr::select(empl_item_detail) %>% distinct() %>% nrow()` unique entries. Various algorithms cannot handle such a large number, if they are defined as factor data types. Therefore, we create a unique id variable for this column based on the row_number function. The result is joined with the invoices table when needed so that only the id column can be used. A reference back to the concrete details is then possible without any problems.
+
+```{r invoices - create unique id column for empl_item_detail}
+# get all unique empl_item_detail values and create an id column
+empl_item_detail_id <- 
+  invoices %>% 
+  dplyr::select(empl_item_detail) %>% 
+  distinct() %>% 
+  mutate(empl_item_detail_id = row_number())
+
+# join with invoices with new table
+invoices <- inner_join(invoices, empl_item_detail_id, by = "empl_item_detail")
+```
+
+- net_amount, line_discount, markup, tax, gross_amount, qty, line_amount, and total_discount: Since it may well be the case that invoices (presumably implausible ones) have no values and have therefore been flagged as incorrect, these project invoices are retained. In the numerical values we find some NA's. It will be useful for further processing to have complete values, thus these values are replaced by the value 0. 
+
+```{r invoices - replace NAs with value 0}
+# replace NAs with value 0 for integer and numeric values
+invoices <- 
+  invoices %>% 
+    mutate_if(is.integer, ~replace(., is.na(.), 0)) %>% 
+    mutate_if(is.numeric, ~replace(., is.na(.), 0))
+```
+
+#### Summary
+
+Here we find the summary of the invoices data. 
+
+```{r summary invoices}
+# data exploration invoices
+summary(invoices) %>% pander(split.tables = 100, style = "rmarkdown", caption = "Head data of table invoices (after mutation)")
+```
+
+### Flagged projects data
+
+The flagged project data contains the project ids that have been flagged as implausible based on different business rules and by different business roles (e.g. sales manager, accounts receivable manager). They are subsequently used to set the flags in the project table to 1. 
+
+#### Data structure
+
+The flagged_projects table consists only of the following column:
+
+- proj_id - the id of the project which has been flagged as implausible project by business experts.
+
+```{r flagged_projects - dimensions and head}
+# dimension of flagged projects data
+dim(flagged_projects)
+
+# head of flagged_projects data
+head(flagged_projects) %>% pander(split.tables = 100, style = "rmarkdown")
+```
+
+#### Initial data types
+
+The data type of proj_id is `r class(flagged_projects$proj_id)`.
+
+#### Mutation
+
+For the flagged projects data no mutation takes place, since this contains only the project ids which is typed correctly.
+
+#### Summary
+
+```{r flagged_projects - unique flagged projects}
+unique_flagged <- 
+  flagged_projects %>% 
+  dplyr::select(proj_id) %>% 
+  distinct() %>% 
+  nrow()
+```
+
+In total, we have `r flagged_projects %>% dplyr::select(proj_id) %>% nrow()` flagged projects. However, for some projects we have multiple reasons for being flagged. The amount of unique projects flagged is `r unique_flagged`.
+
+```{r flagged_projects - summary}
+# data exploration flagged_projects
+summary(flagged_projects) %>% 
+  pander(split.tables = 100, style = "rmarkdown")
+```
+
+## Preprocessing
+
+As mentioned above, we now expand the project data to include the flagged projects (table flagged_projects). These were created in a previous step based on various business rules and are used to classify plausible (flag = 0) and implausible (flag = 1) projects.
+
+```{r preprocessing - create unique flagged projects}
+# create unique flagged project ids
+unique_flagged_project_ids <- 
+  flagged_projects %>% 
+  dplyr::select(proj_id) %>% 
+  distinct()
+```
+
+```{r preprocessing - set flags for projects, echo=TRUE}
+# flag projects in list of all projects based on flagged proj_ids
+for (i in projects$proj_id) {
+  if (i %in% unique_flagged_project_ids$proj_id) {
+    projects$flag[projects$proj_id == i] <- 1
+  }
+}
+```
+
+After flagging the projects we have the following summary:
+
+```{r preprocessing - table flagged unflagged projects}
+# result table after flagging
+table(projects$flag) %>% 
+  pander()
+
+# define number of flagged and unflagged projects 
+nb_flagged_projects <- sum(projects$flag == 1)
+nb_unflagged_projects <- sum(projects$flag == 0)
+```
+
+We can see that `r nb_flagged_projects` projects have been flagged as implausible which is about `r nb_flagged_projects/(nb_unflagged_projects + nb_flagged_projects)` of all projects (`r nb_flagged_projects + nb_unflagged_projects`).
+
+The following plot shows how these flagged projects are distributed over the years: Based on the rules to find implausible projects to flag between 6,000 and 8,000 projects have been flagged for the years 2015 to 2020. However, we recognize that in 2014 we have only a few flagged projects. This is due to the fact that we have only a few data entries for this year. Later on we will remove data from this year (since it is not representative for the total development) based on further business reasons.
+
+```{r preprocessing - plot flagged projects over years}
+# plot flagged projects over years
+projects %>% filter(flag == 1) %>% 
+  group_by(pcd_year) %>% 
+  summarise(count = n()) %>% 
+  ggplot(aes(pcd_year, count)) +
+  geom_bar(stat="identity") +
+  labs(title = "Flagged projects over years", x = "year", y = "count") + 
+  theme(text = element_text(size=global_size))
+```
+
+```{r preprocessing - join projects with invoice data}
+# join projects with invoice data
+projects_invoices <- 
+    inner_join(projects, invoices, by = "proj_invoice_projid") %>% distinct()
+```
+
+## Data visualization 
+
+Before we visualize the data, we joined the service projects with their related invoices to include all potential predictors in terms of invoice details, lastly we removed duplicates. 
+
+### project_id
+
+After the inner join we get `r projects_invoices %>% dplyr::select(proj_id) %>% distinct() %>% nrow()` distinct proj_ids and `r projects_invoices %>% dplyr::select(proj_invoice_id) %>% distinct() %>% nrow()` distinct proj_invoice_ids. As already mentioned, this means that usually we have one invoice per project. However, we can find projects with multiple invoices as we see in the plot. Interestingly, we see that there are some projects which have significant more invoices then around 25. The maximum is one project with almost 150 invoices which seems quite unrealistic and needs to be analyzed further in the ERP system.
+
+```{r plot - projects and invoices, fig.width=4.5}
+# create plot for projects and invoices relationship
+projects_invoices %>% 
+  dplyr::select(proj_id, proj_invoice_id) %>% 
+  group_by(proj_id) %>% 
+  summarize(count = n()) %>% 
+  ggplot(aes(count)) + 
+  geom_bar(color = "black", stat = "count") + 
+  labs(title = "Distribution invoices per projects", x = "invoice per project", y = "count") + 
+  theme(text = element_text(size=global_size))
+```
+
+### channel 
+
+The plot **Distribution of projects per channels** shows that we have `r projects_invoices %>% distinct(channel) %>% nrow()` channels. `r projects_invoices %>% group_by(channel) %>% summarise(count = n()) %>% filter(count <= 110) %>% nrow()` channels have less than 110 projects, `r projects_invoices %>% group_by(channel) %>% summarise(count = n()) %>% filter(count < 5) %>% nrow()` of them below 5 projects. These channels could be further investigated within the ERP system to validate if those are incorrect data entries.
+
+```{r plot - channel}
+# create plot for channel distribution
+projects_invoices %>% 
+  group_by(channel) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count)) %>% 
+  mutate(channel = reorder(channel, count)) %>%
+  ggplot(aes(channel, count)) + #, y = ..prop..)) +
+  geom_bar(color = "black", stat = "identity") + 
+  coord_flip() +
+  labs(title = "Distribution of projects per channel", x = "channel", y = "count") + 
+  theme(text = element_text(size=global_size))
+```
+
+### correction and fix projects
+
+Investigating the correction and fix projects we can see that around 90% of the projects are regular (not correction) projects and around 80% are time and material (not fixed) projects. 
+
+```{r plot - correction and fix projects}
+# create plot for correction projects
+p1 <- 
+  projects_invoices %>% 
+  ggplot(aes(correction)) + 
+  geom_bar(aes(y = (..count..)/sum(..count..))) +
+  coord_flip() +
+  scale_x_discrete(limits = c(0,1)) + 
+  scale_y_continuous(labels = percent_format()) +
+  labs(title = "Distribution of correction projects", x = "correction", y = "percentage") + 
+  theme(text = element_text(size=global_size))
+  
+# create plot for fix projects
+p2 <- projects_invoices %>% 
+  ggplot(aes(fix)) + 
+  geom_bar(aes(y = (..count..)/sum(..count..))) +
+  coord_flip() +
+  scale_x_discrete(limits = c(0,1)) + 
+  scale_y_continuous(labels = percent_format()) +
+  labs(title = "Distribution of fix projects", x = "fix", y = "percentage") + 
+  theme(text = element_text(size=global_size))
+
+# plot combined plots
+grid.arrange(p1, p2, nrow = 2)
+```
+
+### project_create_date and project_end_date
+
+In terms of time following question could arise: 
+
+- When are the most projects created during the year? 
+- What is the "high season"? 
+- When do they end typically? 
+
+These and other questions are answered here. Let us look on the total temporal development first. We can see that we have a enormous peak in the first time period. 
+
+```{r plot - projects created, fig.width=6, fig.height=4}
+# projects created - date perspective
+projects_invoices %>% 
+  group_by(project_create_date) %>% 
+  summarize(n = n()) %>% 
+  ggplot(aes(project_create_date, n)) +
+  geom_line() +
+  labs(title = "Development of projects created", x = "date", y = "count") + 
+  theme(text = element_text(size=global_size))
+```
+
+A closer look shows that this is the 25th of December in 2014 which seems quite uncommon to create projects (since it is a vacation day). The question to the business department revealed that there was the migration date from the former system - and all the projects so far have been booked on this date. Based on this and the fact that we have only a few aggregated data entries for 2014, we exclude the year 2014 from now on and start from 2015. 
+
+```{r plot - projects created - 2014 removed, fig.width=5, fig.height=3}
+# projects starting from 2015 based on explanations
+projects_invoices <- 
+  projects_invoices %>% 
+  filter(project_create_date >= '2015-01-01')
+```
+
+We can also see that there is a seasonality which we could investigate further. In what way are the months differently for each year? We can see that the high season of creating projects seems to be June till August, then if shrinks to the years end. Interestingly the January seems uncommon since it is higher than December and February. Reason could be that projects that are not "worth" it to start in the old year will be shifted to the next year.
+
+```{r plot - projects created month analysis}
+# projects created - monthly perspective
+projects_invoices %>% 
+  ggplot(aes(pcd_month)) +
+  geom_bar(stat="count")+
+  scale_x_discrete(limits=c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")) + 
+  labs(title = "Comparison of projects created per month", x = "month", y = "count") + 
+  theme(text = element_text(size=global_size))
+```
+
+It looks a bit different when we look at the project end date. First of all, it is noticeable that many projects do not seem to have an end date recorded and it is set to the default value of 1900. 
+
+```{r projects end summary, fig.width=6, fig.height=6}
+# projects end - year perspective
+projects_invoices %>% 
+  group_by(ped_year) %>% 
+  summarize(count = n()) %>% 
+  pander(split.tables = 100, style = "rmarkdown")
+```
+
+When we filter out these default values and show the plot **Project end dates per year**, we see: With the exception of 2015 - which in turn is due to the aforementioned introduction of the new system - there are no anomalies here. 
+
+```{r projects end}
+# projects end - year perspective
+projects_invoices %>% 
+  filter(ped_year >= 2015) %>% 
+  ggplot(aes(ped_year)) +
+  geom_bar() + 
+  labs(title = "Project end dates per year", x = "year", y = "count") + 
+  theme(text = element_text(size=global_size))
+```
+
+Let us check if there are any anomalies in the months for the project end dates. We can see that by far the most projects are completed in January, followed by June and November. 
+
+```{r plot - projects end monthly perspective}
+# projects end - monthly perspective
+projects_invoices %>% 
+  ggplot(aes(ped_month)) +
+  geom_bar(stat="count")+
+  scale_x_discrete(limits=c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")) + 
+  labs(title = "Project end dates per month", x = "month", y = "count") + 
+  theme(text = element_text(size=global_size))
+```
+
+If we look at January on a daily basis, we see that the most projects have the 31st as the end date. This may be related to the fact that this is possible with the month-end and years-end closing term and possibly adding value to the previous year.
+
+```{r plot - projects end daily perspective for January}
+# projects end - daily perspective for January
+projects_invoices %>%
+  filter(ped_month == 1 & ped_year >= 2015) %>%
+  mutate(project_end_day_jan = day(project_end_date)) %>% 
+  ggplot(aes(project_end_day_jan)) +
+  geom_bar(stat="count") +
+  labs(title = "Projects end daily analysis for January", x = "day", y = "count") + 
+  theme(text = element_text(size=global_size))
+```
+
+### project_status
+
+The view of the project status is very plausible: most projects are "work finished". Only a few are in "work in progress" status. However, it is surprising that the projects where the work has been finished are not set to the status "closed". Maybe this is a state which is not required anymore.
+
+```{r plot - project status}
+# plot project status
+projects_invoices %>%
+  dplyr::select(project_status) %>% 
+  ggplot(aes(project_status)) +
+  geom_bar() +
+  labs(title = "Project status", x = "proejct status", y = "count") +
+  coord_flip() + 
+  theme(text = element_text(size=global_size))
+```
+
+### cust_account
+
+The customer accounts can be analyzed as follows: There are a total of `r projects_invoices$cust_account %>% unique() %>% length()` unique customer accounts to which invoices have been sent. Thereby, some customers are particularly active, which can be seen from the plot **Top 20 customer accounts**.
+
+```{r plot - top 20 customer accounts}
+# top 20 customer accounts
+projects_invoices %>% 
+   group_by(cust_account) %>% 
+   summarise(count = n()) %>% 
+   arrange(desc(count)) %>% 
+   top_n(20, count) %>% 
+   ggplot(aes(count, reorder(cust_account, count))) +
+   geom_bar(color = "black", stat = "identity") +
+   labs(title = "Top 20 customer accounts", x = "cust_account", y = "count") + 
+  theme(text = element_text(size=global_size))
+```
+
+Additionally, it seems that the top 20 customers usually handle their services through only a few channels. However, there are some who also use significantly more channels, see **Top 20 customer accounts and channel usage**. Further analyses should be carried out to find out the reasons for this in discussion with the business experts.
+
+```{r plot - top 20 cust_accounts and channels, fig.width=8, fig.height=6}
+# define top 20 cust_accounts
+top_20_cust_accounts <- projects_invoices %>% 
+   group_by(cust_account) %>% 
+   summarise(count = n()) %>% 
+   arrange(desc(count)) %>% 
+   top_n(20, count) %>% 
+   dplyr::select(cust_account)
+
+# plot relationship between top 20 cust_accounts and channel usage
+top_20_cust_accounts %>%
+  inner_join(projects_invoices, by = "cust_account") %>% 
+  dplyr::select(cust_account, channel) %>% 
+  group_by(cust_account, channel) %>% 
+  summarise(count = n()) %>% 
+  ggplot(aes(channel, count)) + 
+  geom_bar(stat="identity") + 
+  facet_wrap(. ~ cust_account) +
+  scale_x_discrete(label=abbreviate) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Top 20 customer accounts and channel usage", x = "cust_account", y = "count") + 
+  theme(text = element_text(size=global_size))
+```
+
+### order_account
+
+In this industry of construction, even for services, it can always happen that there are differences between the order account and the invoice account. For example, a property management company places the order, but the invoice itself goes to the apartment owner. The top 20 order accounts are as follows: 
+
+```{r plot - top 20 order accounts}
+# plot top 20 order accounts
+projects_invoices %>% 
+   group_by(order_account) %>% 
+   summarise(count = n()) %>% 
+   arrange(desc(count)) %>% 
+   top_n(20, count) %>% 
+   ggplot(aes(count, reorder(order_account, count))) +
+   geom_bar(color = "black", stat = "identity") +
+   labs(title = "Top 20 order accounts", x = "order_account", y = "count") + 
+  theme(text = element_text(size=global_size))
+```
+
+Again, we look at how these order accounts are distributed across the channels and see a similar result as above with cust_accounts.
+
+```{r plot - top 20 order_account and channels, fig.width=8, fig.height=6}
+# define top 20 order accounts
+top_20_order_accounts <- projects_invoices %>% 
+   group_by(order_account) %>% 
+   summarise(count = n()) %>% 
+   arrange(desc(count)) %>% 
+   top_n(20, count) %>% 
+   dplyr::select(order_account)
+
+# plot relationship between top 20 order accounts and channel usage
+top_20_order_accounts %>%
+  inner_join(projects_invoices, by = "order_account") %>% 
+  dplyr::select(order_account, channel) %>% 
+  group_by(order_account, channel) %>% 
+  summarise(count = n()) %>% 
+  ggplot(aes(channel, count)) + 
+  geom_bar(stat="identity") + 
+  facet_wrap(. ~ order_account) +
+  scale_x_discrete(label=abbreviate) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  labs(title = "Top 20 order accounts and channel usage", x = "order_account", y = "count") + 
+  theme(text = element_text(size=global_size))
+```
+
+### invoice_account
+
+```{r top 20 invoice account}
+top_20_inv_accounts <- projects_invoices %>% 
+   group_by(invoice_account) %>% 
+   summarise(count = n()) %>% 
+   arrange(desc(count)) %>% 
+   top_n(20, count) %>% 
+   dplyr::select(invoice_account)
+```
+
+The picture for the invoice accounts is similar: Of the top 20 customer accounts, `r inner_join(top_20_cust_accounts, top_20_inv_accounts, by = c("cust_account" = "invoice_account")) %>% nrow()` are also in the top 20 invoice accounts. 
+
+```{r plot - top 20 invoice_account}
+# top 20 invoice_accounts
+projects_invoices %>% 
+   group_by(invoice_account) %>% 
+   summarise(count = n()) %>% 
+   arrange(desc(count)) %>% 
+   top_n(20, count) %>% 
+   ggplot(aes(count, reorder(invoice_account, count))) +
+   geom_bar(color = "black", stat = "identity") +
+   labs(title = "Top 20 invoice accounts", x = "invoice_account", y = "count") + 
+  theme(text = element_text(size=global_size))
+```
+
+Here is the overview of the distribution of the invoice accounts to the channels. You can see a similar picture as with the customer and order accounts.
+
+```{r plot - top 20 invoice_account and channels, fig.width=8, fig.height=6}
+# plot top 20 invoice_account and channels, fig.width=8, fig.height=6}
+top_20_inv_accounts %>%
+  inner_join(projects_invoices, by = "invoice_account") %>% 
+  dplyr::select(invoice_account, channel) %>% 
+  group_by(invoice_account, channel) %>% 
+  summarise(count = n()) %>% 
+  ggplot(aes(channel, count)) + 
+  geom_bar(stat="identity") + 
+  facet_wrap(. ~ invoice_account) +
+  scale_x_discrete(label=abbreviate) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Top 20 invoices accounts and channel usage", x = "invoice_account", y = "count") + 
+  theme(text = element_text(size=global_size))
+```
+
+### blocked_for_invoice
+
+The blocked for invoice status is assigned to customers whose payment status is being checked and for whom a new project must not be opened. However, this concerns only a very small part, as we can see from the table. There are only 6809 projects blocked for invoicing.
+
+```{r blocked for invoice}
+# table blocked_for_invoice 
+projects_invoices %>%
+  dplyr::select(blocked_for_invoice) %>% 
+  group_by(blocked_for_invoice) %>% 
+  summarise(count = n()) %>% 
+  pander(split.tables = 100, style = "rmarkdown")
+```
+
+\newpage
+### warranty_claim
+
+The warranty claims show four different statuses. The higher the number, the higher the critically of the case. Further details on the statuses are not available from the business.
+
+```{r warranty claim}
+# table warranty_claim
+projects_invoices %>%
+  dplyr::select(warranty_claim) %>% 
+  group_by(warranty_claim) %>% 
+  summarise(count = n()) %>% 
+  pander(split.tables = 100, style = "rmarkdown")
+```
+
+### proj_invoice_projid and proj_invoice_id
+
+The variable proj_invoice_projid represents only a legal basis for a project and is not analyzed further. Only the pattern is checked. It can be seen that this has a clear and unambiguous structure - which is also important for the connection between project and project invoice. 
+
+```{r proj_invoice_projid pattern}
+#proj_invoice_projid pattern
+projects_invoices$proj_invoice_projid %>% 
+  bpa(unique = TRUE) %>% 
+  pander(split.tables = 100, style = "rmarkdown")
+```
+
+The same applies to the analysis of the variable proj_invoice_id. Here we will also only check the pattern to see if there are any anomalies. This is not the case after the cleanup above. 
+
+```{r proj_invoice_id pattern}
+#proj_invoice_id pattern
+projects_invoices$proj_invoice_id %>% 
+  bpa(unique = TRUE) %>% 
+  pander(split.tables = 100, style = "rmarkdown")
+```
+
+### invoice_create_date
+
+When were the invoices generated over time between the years? Are there any "highlights" at the monthly level? 
+We see an increase of invoices created on a yearly perspective from 2015 to 2020. However, in 2021 the level was below the invoices created level from 2015. 
+
+```{r plot - invoice create date year}
+# invoices created - yearly perspective
+projects_invoices %>% 
+  filter(icd_year >= 2015) %>% 
+  ggplot(aes(icd_year)) +
+  geom_bar() +
+  labs(title = "Development of invoices created per year ", x = "year", y = "count") + 
+  theme(text = element_text(size=global_size))
+```
+
+On a monthly basis the plot shows that we have a high season during summer what makes sense in this construction industry, also regarding after sales services. 
+
+```{r plot - invoice create date per month}
+# invoices created - monthly perspective
+projects_invoices %>% 
+  ggplot(aes(icd_month)) +
+  geom_bar(stat="count")+
+  scale_x_discrete(limits=c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")) + 
+  labs(title = "Development of invoice created per month", x = "month", y = "count") + 
+  theme(text = element_text(size=global_size))
+```
+
+### invoice_date
+
+What is the typical invoice date for the customers perspective? Can we detect something unusual?
+Since it would be irritating if the time period between creation date and invoice date - and thus the pattern - would diverge much, it is understandable that the consideration of the invoice dates provides a very similar picture to the creation date of invoices; for years as well as for months. 
+
+```{r plot - invoice date year}
+# invoice date - yearly perspective
+projects_invoices %>% 
+  filter(invd_year >= 2015) %>% 
+  ggplot(aes(invd_year)) +
+  geom_bar() +
+  labs(title = "Development of invoice dates per year", x = "year", y = "count") + 
+  theme(text = element_text(size=global_size))
+
+```
+
+```{r plot - invoice date month}
+# invoice dates - monthly perspective
+projects_invoices %>% 
+  ggplot(aes(invd_month)) +
+  geom_bar(stat="count")+
+  scale_x_discrete(limits=c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")) + 
+  labs(title = "Development of invoice dates per month", x = "month", y = "count") + 
+  theme(text = element_text(size=global_size))
+```
+
+### due_date
+
+When looking at the due date, it is noticeable that some invoices are already due for the year 2022. In addition, it can be seen that fewer due dates were assigned in 2021 compared to the previous years (except 2015).
+
+```{r plot - due date year}
+# due date - yearly perspective
+projects_invoices %>% 
+  filter(dd_year >= 2015) %>% 
+  ggplot(aes(dd_year)) +
+  geom_bar() +
+  labs(title = "Development of due date per year", x = "year", y = "count") + 
+  theme(text = element_text(size=global_size))
+```
+In the months of the due dates, one can clearly see the tendency that the invoices are usually set from the middle of the year so that they are due before the end of the year.
+
+```{r plot - due date month}
+# due dates - monthly perspective
+projects_invoices %>% 
+  ggplot(aes(dd_month)) +
+  geom_bar(stat="count")+
+  scale_x_discrete(limits=c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")) +
+  labs(title = "Development of due date per month",x = "month", y = "count") + 
+  theme(text = element_text(size=global_size))
+```
+
+### invoice amounts
+
+The relationships regarding the invoice calculation are as follows: 
+
+- The (a) quantity * base amount (not existing in the data) - (b) line discount = (c) line amount
+- sum over all line amounts = (d) net amount 
+- net amount - (e) total discount + (f) markup + (g) tax = (h) gross amount
+
+#### General analysis 
+
+First, we want to provide a general overview of the key figures of the invoices. The correlation plot helps us to do this. We get a high positive correlation when looking at the net amount with the gross amount. This is understandable, since the gross amount is calculated on the basis of the net amount plus the markups and the taxes. All other variables do not have high correlations.
+
+``` {r plot - correlation invoice amounts, fig.height = 5, fig.width = 5}
+# create data frame for correlation based on invoice amounts
+d <- data.frame(
+    qty = projects_invoices$qty,
+    line_discount = projects_invoices$line_discount,
+    line_amount = projects_invoices$line_amount,
+    net_amount = projects_invoices$net_amount,
+    total_discount = projects_invoices$total_discount,
+     markup = projects_invoices$markup,
+     tax = projects_invoices$tax, 
+     gross_amount = projects_invoices$gross_amount
+)
+
+#create corrplot for invoice amounts
+corrplot(cor(d, use = "pairwise.complete.obs"), method = "number") 
+```
+
+#### (a) qty
+
+It is quickly apparent that the quantity is very clearly distributed: The summary shows that the 1st quartile, the median, the average and the 3rd quartile are between 1 and 3.  The outliers with a minimum of -250 and a maximum of 980 are apparently very unusual values, as the diagram shows.
+
+```{r plot - qty}
+# summary qty
+summary(projects_invoices$qty) %>% 
+    pander(split.tables = 100, style = "rmarkdown")
+
+# histogram qty
+projects_invoices %>% 
+  dplyr::select(qty) %>%
+  ggplot(aes(qty)) +
+  geom_histogram(color = "black") + 
+  labs(title = "Histogram quantity") + 
+  theme(text = element_text(size=global_size))
+```
+
+#### (b) line_discount
+
+The line discount, which leads to the line amount after deduction on line item level, is distributed similarly to low values as the quantity. The histogram provides a strongly skewed distribution. No line discount was given more than one million times.
+
+```{r plot - line discount}
+# histogram line discount
+projects_invoices %>% 
+  dplyr::select(line_discount) %>%
+  ggplot(aes(line_discount)) +
+  geom_histogram(color = "black", binwidth = 100) + 
+  labs(title = "Histogram line_discount") + 
+  theme(text = element_text(size=global_size))
+```
+
+#### (c) line_amount
+
+The line amount represents the amount that is on the line item level on the invoice. We see that we have negative as well as positive values, showing that there seem to be correction items on the invoices. The most frequent values are between 0 and 100. 
+
+```{r plot - line amount}
+# histogram line_amount
+projects_invoices %>% 
+  dplyr::select(line_amount) %>%
+  ggplot(aes(line_amount)) +
+  geom_histogram(color = "black", binwidth = 100) + 
+  labs(title = "Histogram line_amount") + 
+  theme(text = element_text(size=global_size))
+```
+
+#### (d) net_amount
+
+The net amount could show a normal distribution, but this is not obvious at first glance. 
+
+```{r plot - net amount}
+# histogram net_amount
+projects_invoices %>% 
+  dplyr::select(net_amount) %>%
+  ggplot(aes(net_amount)) +
+  geom_histogram(color = "black", binwidth = 100) + 
+  labs(title = "Histogram net_amount") + 
+  theme(text = element_text(size=global_size))
+```
+
+The 0 and negative amounts hide the view. If we remove them, we get a slightly different perspective. 
+
+```{r plot - net amount greater 0}
+# histogram net_amount > 0
+projects_invoices %>% 
+  dplyr::select(net_amount) %>%
+  filter(net_amount > 0) %>% 
+  ggplot(aes(net_amount)) +
+  geom_histogram(color = "black", binwidth = 100) + 
+  labs(title = "Histogram net_amount > 0") + 
+  theme(text = element_text(size=global_size))
+
+# define variables
+net_amount_mean <- mean(projects_invoices$net_amount, na.rm = TRUE)
+net_amount_sd <- sd(projects_invoices$net_amount, na.rm = TRUE)
+```
+
+Now we calculate the mean and the standard deviation and see that even this adjustment of the data still shows a very wide distribution of the net amount (mean = `r net_amount_mean`, sd = `r net_amount_sd`). 
+
+#### (e) total_discount
+
+The total discount is applied to the entire invoice and deducted at the end of the net amount. The correlation analysis showed that there is no statistically meaningful relationship between it and the line amount. This means that the sales staff allocate them independently of each other. 
+
+```{r plot - total_discount}
+# histogram total_discount
+projects_invoices %>% 
+  dplyr::select(total_discount) %>%
+  ggplot(aes(total_discount)) +
+  geom_histogram(color = "black", binwidth = 100) + 
+  labs(title = "Histogram total_discount") + 
+  theme(text = element_text(size=global_size))
+```
+
+The total discount is also awarded similarly infrequently as the line discount. Again, there are over 1 million entries that do not award a discount. Let us have a look on the top 10 of the total discounts. 
+
+```{r top 10 total discount}
+projects_invoices %>% 
+  group_by(total_discount) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count)) %>% 
+  top_n(10) %>% 
+  pander(split.tables = 100, style = "rmarkdown")
+```
+
+#### (f) markup
+
+Markup is the amount on an invoice that is either added or deducted. Most often, these are fees for road closures or permits that must be applied for in order for the service to be provided. 
+
+```{r plot - markup}
+# histogram total_discount
+projects_invoices %>% 
+  dplyr::select(markup) %>%
+  ggplot(aes(markup)) +
+  geom_histogram(color = "black", binwidth = 100) + 
+  labs(title = "Histogram markup") + 
+  theme(text = element_text(size=global_size))
+```
+
+The summary shows that there are large outliers, but that the 1st quantile, the median, the mean and the 3rd quantile values are close to zero. 
+
+```{r markup summary}
+# summary markup
+summary(projects_invoices$markup) %>% 
+  pander(split.tables = 100, style = "rmarkdown")
+```
+
+#### (g) tax
+
+In the case of the tax, we see that we, of course, have no negative tax amount. Since we have many small values for the net amount, the proportional tax amount relates similar.
+
+```{r plot - tax}
+# histogram tax
+projects_invoices %>% 
+  dplyr::select(tax) %>%
+  ggplot(aes(tax)) +
+  geom_histogram(color = "black", binwidth = 100) + 
+  labs(title = "Histogram tax") + 
+  theme(text = element_text(size=global_size))
+```
+
+#### (h) gross_amount
+
+The gross amount is the final value of the invoice to the customer. Since this is a calculated result based on the net amount, which has already been analyzed in more detail, we do not expect any surprises in terms of values. The plot clearly underlines this and the high correlation as shown above betwenn gross amount and net amount. 
+```{r plot - gross_amount}
+# histogram net_amount
+projects_invoices %>% 
+  dplyr::select(gross_amount) %>%
+  ggplot(aes(gross_amount)) +
+  geom_histogram(color = "black", binwidth = 100) + 
+  labs(title = "Histogram gross_amount") + 
+  theme(text = element_text(size=global_size))
+```
+
+### weight
+
+The variable weight reflects a variable that is not used very often: minimum, 1st quartile, median, and the 3rd quartile are 0. The mean value is only slightly above 0 due to the large outlier, which is almost 10,000. 
+
+```{r plot - weight}
+# histogram weight
+projects_invoices %>% 
+  dplyr::select(weight) %>%
+  ggplot(aes(weight)) +
+  geom_histogram(color = "black", binwidth = 100) + 
+  labs(title = "Histogram weight") + 
+  theme(text = element_text(size=global_size))
+```
+
+Due to the low variability, we will remove this variable from here on.
+
+```{r weight summary}
+# summary weight
+summary(projects_invoices$weight) %>% 
+    pander(split.tables = 100, style = "rmarkdown")
+```
+
+```{r remove weight}
+# remove weight from data 
+projects_invoices <- 
+  projects_invoices %>% 
+  dplyr::select(-weight)
+```
+
+### type
+
+The variable type indicates whether the line item is a product or an hour worked by an employee. During the service, according to the plot, about 3x more item entries are listed on the invoices than labor hours. This is easily understandable, since the items also include numerous spare parts and other small and cleaning materials.
+
+```{r plot - type}
+# plot type
+projects_invoices %>% 
+  dplyr::select(type) %>% 
+  ggplot(aes(type)) +
+  geom_bar(color = "black") + 
+  coord_flip() + 
+  labs(title = "Distribution of type", x = "type", y = "count") + 
+  theme(text = element_text(size=global_size))
+```
+
+### category
+
+When analyzing the category, we find that on the one hand there are no data errors: The categories are clearly assigned to the types described above. In addition, the plot shows that for the employee categories, category 3 is the most frequent on the invoice; in contrast, for the items, category 8 is at the top of the list, followed by categories 6 and 1. 
+
+```{r category, fig.width= 6}
+# plot category
+projects_invoices %>% 
+  dplyr::select(category, type) %>% 
+  ggplot(aes(category)) +
+  geom_bar(color = "black") +
+  scale_x_discrete(label=abbreviate) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  facet_grid(type ~ . ) +
+  labs(title = "Distribution of categories per type") + 
+  theme(text = element_text(size=global_size))
+```
+
+### empl_item_detail
+
+In total, we find `r projects_invoices %>% dplyr::select(empl_item_detail) %>% distinct() %>% nrow()` different detail information about the employee or items in the data. The top 20 per type are as follows. 
+
+```{r top 20 empl_item_detail, fig.width=6}
+# plot top 20 empl_item_details - type empl
+p1 <- projects_invoices %>% 
+  filter(type == "EMPL") %>% 
+  group_by(empl_item_detail) %>% 
+   summarise(count = n()) %>% 
+   arrange(desc(count)) %>% 
+   top_n(20, count) %>% 
+   ggplot(aes(count, reorder(empl_item_detail, count))) +
+   geom_bar(color = "black", stat = "identity") +
+   labs(title = "Top 20 workers", y = "worker_id") + 
+  theme(text = element_text(size=global_size))
+
+# plot top 20 empl_item_details - type item
+p2 <- projects_invoices %>% 
+  filter(type == "ITEM") %>% 
+  group_by(empl_item_detail) %>% 
+   summarise(count = n()) %>% 
+   arrange(desc(count)) %>% 
+   top_n(20, count) %>% 
+   ggplot(aes(count, reorder(empl_item_detail, count))) +
+   geom_bar(color = "black", stat = "identity") +
+  scale_x_continuous(breaks = c(100000, 200000)) +
+   labs(title = "Top 20 items", y = "item_id") + 
+  theme(text = element_text(size=global_size))
+
+# plot total plot
+grid.arrange(p1, p2, nrow=1)
+```
+
+Among the workers, the distribution of the top 20 is quite similar, with only one employee standing out a bit. In the case of the items, on the other hand, there are two in particular that appear on the invoices with particular frequency. The investigation of the invoices shows that these are items that are usually found on the invoice: the general fee for travel and the general fee for small and cleaning material. These items are rarely removed from the invoice.
+
+```{r stop timer explore clean visualize data}
+#Stop timer
+mytimer$stop(" Explore, clean and visualize data")
+```
+
+\newpage
+# Modeling approach
+
+```{r start timer modeling approach}
+#Start timer
+mytimer$start("Modeling approach")
+```
+
+```{r clean all variables}
+# clean data not required for modeling approach
+rm(d, flagged_projects, invoices, p1, p2, projects, top_20_cust_accounts, top_20_inv_accounts, top_20_order_accounts, unique_flagged_project_ids)
+```
+
+In order to find the best performing model we will use the predictors as described in the prior section individually or in combination and apply different methods to train the models.
+
+## Initialization of modeling
+
+Since the date values for the variables project_end_date, invoice_date, due_date, invoice_create_date are not suitable for prediction, they will be removed. We also remove the variables proj_id, proj_invoice_projid and proj_invoice_id; they are unique or almost unique values respectively that do not represent additional information for our purpose. As mentioned above also the variable empl_item_detail is neglected, since we work with the unique id instead of the character variable. 
+
+```{r clean data}
+# clean data from date and character types
+model_data <- 
+  projects_invoices %>% 
+  dplyr::select(-proj_id, -proj_invoice_projid, -proj_invoice_id, -project_end_date, -invoice_date, -due_date, -invoice_create_date, -empl_item_detail, -cust_account, -invoice_account, -order_account)
+```
+
+## Smoothplots for single predictors
+
+To dive deeper into the data plots are created that show the average, the median and the standard error over each potential predictor. In addition to this a smoothplot is added to get a first idea about fitting based on single predictors using LOESS as a fitting algorithm. Since we have multiple smoothplots, we focus on those being relevant. The plots come first, followed by the findings for the plots. 
+
+```{r smoothplots, fig.width=5, fig.height=5}
+# create channel id from row_number 
+channel_id <- 
+  model_data %>% 
+  dplyr::select(channel) %>% 
+  distinct() %>% 
+  mutate(channel_id = row_number())
+
+# replace channel with channel id in data and remove variable channel 
+model_data <- 
+  model_data %>% 
+  inner_join(channel_id, by = "channel") %>% 
+  dplyr::select(-channel)
+
+# plot smoothplot channel
+sp_channel <- 
+  model_data %>% 
+  group_by(channel_id) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = channel_id, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot channel_id") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot correction
+sp_correction <- 
+  model_data %>% 
+  group_by(correction) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = correction, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot correction") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot fix
+sp_fix <-
+  model_data %>% 
+  group_by(fix) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = fix, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot fix") + 
+  theme(text = element_text(size=global_size))
+
+# create project status id from row_number 
+project_status_id <- 
+  model_data %>% 
+  dplyr::select(project_status) %>% 
+  distinct() %>% 
+  mutate(project_status_id = row_number())
+
+# replace project status with project status id in data and remove variable project status
+model_data <- 
+  model_data %>% 
+  inner_join(project_status_id, by = "project_status") %>% 
+  dplyr::select(-project_status)
+
+# plot smoothplot project status 
+sp_project_status <-
+  model_data %>% 
+  group_by(project_status_id) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = project_status_id, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot project status") + 
+  theme(text = element_text(size=global_size))
+
+# create type id from row_number 
+type_id <- 
+  model_data %>% 
+  dplyr::select(type) %>% 
+  distinct() %>% 
+  mutate(type_id = row_number())
+
+# replace type with type id in data and remove variable type 
+model_data <- 
+  model_data %>% 
+  inner_join(type_id, by = "type") %>% 
+  dplyr::select(-type)
+
+# plot smoothplot type
+sp_type <- 
+  model_data %>% 
+  group_by(type_id) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = type_id, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot type") + 
+  theme(text = element_text(size=global_size))
+
+# create category id from row_number 
+category_id <- 
+  model_data %>% 
+  dplyr::select(category) %>% 
+  distinct() %>% 
+  mutate(category_id = row_number())
+
+# replace category with category id in data and remove variable category
+model_data <- 
+  model_data %>% 
+  inner_join(category_id, by = "category") %>% 
+  dplyr::select(-category)
+
+# plot smoothplot category
+sp_category <- 
+  model_data %>% 
+  group_by(category_id) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = category_id, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot category_id") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot blocked for invoice
+sp_blocked <- 
+  model_data %>% 
+  group_by(blocked_for_invoice) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = blocked_for_invoice, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot blocked_for_invoice") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot warranty claim
+sp_warranty <- 
+  model_data %>% 
+  group_by(warranty_claim) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = warranty_claim, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot warranty_claim") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot pcd_year
+sp_pcd_year <-
+  model_data %>% 
+  group_by(pcd_year) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = pcd_year, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot pcd_year") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot pcd_month
+sp_pcd_month <-model_data %>% 
+  group_by(pcd_month) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = pcd_month, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot pcd_month") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot pcd_day
+sp_pcd_day <- 
+  model_data %>% 
+  group_by(pcd_day) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = pcd_day, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot pcd_day") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot ped_year
+sp_ped_year <- 
+  model_data %>% 
+  filter(ped_year >= 2015) %>% 
+  group_by(ped_year) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = ped_year, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot ped_year") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot ped_month
+sp_ped_month <- 
+  model_data %>% 
+  group_by(ped_month) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = ped_month, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot ped_month") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot ped_day
+sp_ped_day <- 
+  model_data %>% 
+  group_by(ped_day) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = ped_day, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot ped_day") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot net_amount
+sp_net_amount <- 
+  model_data %>% 
+  group_by(net_amount) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = net_amount, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot net_amount") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot line_discount
+sp_line_discount <-
+  model_data %>% 
+  group_by(line_discount) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = line_discount, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot line_discount") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot total_discount
+sp_total_discount <- 
+  model_data %>% 
+  group_by(total_discount) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = total_discount, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot total_discount") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot markup
+sp_markup <- 
+  model_data %>% 
+  group_by(markup) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = markup, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot markup") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot tax
+sp_tax <- 
+  model_data %>% 
+  group_by(tax) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = tax, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot tax") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot gross_amount
+sp_gross_amount <- 
+  model_data %>% 
+  group_by(gross_amount) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = gross_amount, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot gross_amount") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot qty
+sp_qty <- 
+  model_data %>% 
+  group_by(qty) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = qty, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot qty") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot line_amount
+sp_line_amount <- 
+  model_data %>% 
+  group_by(line_amount) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = line_amount, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot line_amount") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot icd_year
+sp_icd_year <- 
+  model_data %>% 
+  group_by(icd_year) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = icd_year, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot icd_year") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot icd_month
+sp_icd_month <- 
+  model_data %>% 
+  group_by(icd_month) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = icd_month, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot icd_month") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot icd_day
+sp_icd_day <-
+  model_data %>% 
+  group_by(icd_day) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = icd_day, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot icd_day") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot invd_year
+sp_invd_year <- 
+  model_data %>% 
+  group_by(invd_year) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = invd_year, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot invd_year") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot invd_month
+sp_invd_month <- 
+  model_data %>% 
+  group_by(invd_month) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = invd_month, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot invd_month") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot invd_day
+sp_invd_day <- 
+  model_data %>% 
+  group_by(invd_day) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = invd_day, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot invd_day") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot dd_year
+sp_due_year <-
+  model_data %>% 
+  group_by(dd_year) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = dd_year, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot dd_year") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot dd_month
+sp_due_month <-
+  model_data %>% 
+  group_by(dd_month) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = dd_month, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot dd_month") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot dd_day
+sp_due_day <- 
+  model_data %>% 
+  group_by(dd_day) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = dd_day, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot dd_day") + 
+  theme(text = element_text(size=global_size))
+
+# plot smoothplot empl_item_detail_id
+sp_empl_item_detail <- 
+  model_data %>% 
+  group_by(empl_item_detail_id) %>% 
+  summarize(n = n(), 
+            avg = mean(flag), 
+            med = median(flag),
+            se = sd(flag)) %>% 
+  ggplot(aes(x = empl_item_detail_id, y = avg, ymin = avg - se, ymax = avg + se, col="avg")) + 
+  geom_point() +
+  geom_point(aes(y=med, col = "median")) + 
+  geom_errorbar(aes(alpha= 0.3), show.legend = FALSE) + 
+  geom_smooth() +
+  labs(title = "Smoothplot empl_item_detail_id") + 
+  theme(text = element_text(size=global_size))
+```
+
+```{r plot smoothplots 1, fig.width= 6.5, fig.height=8}
+# plot combined plots
+grid.arrange(sp_channel, sp_correction, sp_fix, sp_project_status, sp_type, sp_category, sp_blocked, sp_warranty, sp_empl_item_detail, sp_qty, sp_line_discount, sp_line_amount, ncol = 2)
+
+grid.arrange(sp_net_amount, sp_total_discount, sp_markup, sp_tax, sp_gross_amount, sp_pcd_year, sp_pcd_month, sp_pcd_day, sp_ped_year, sp_ped_month, sp_ped_day, sp_icd_year, ncol = 2)
+```
+
+```{r plot smoothplots 2, fig.width= 6.5, fig.height=6.5}
+grid.arrange(sp_icd_month, sp_icd_day, sp_invd_year, sp_invd_month, sp_invd_day, sp_due_year, sp_due_month, sp_due_day, ncol = 2)
+```
+
+```{r clean smoothplots objects}
+# clean objects 
+rm(sp_channel, sp_correction, sp_fix, sp_project_status, sp_type, sp_category, sp_blocked, sp_warranty, sp_empl_item_detail, sp_pcd_year, sp_pcd_month, sp_pcd_day, sp_ped_year, sp_ped_month, sp_ped_day, sp_icd_year, sp_icd_month, sp_icd_day, sp_invd_year, sp_invd_month, sp_invd_day, sp_due_year, sp_due_month, sp_due_day, sp_qty, sp_line_discount, sp_line_amount, sp_net_amount, sp_total_discount, sp_markup, sp_tax, sp_gross_amount)
+```
+
+In total, we analyzed 32 smoothplots whereas 10 show a higher variability. All these plots are potential predictors for detecting implausible projects. For the other variables their smoothplots showed no or little variability. Thus, we do not consider them in term of the following steps. In addition, we remove the variable gross_amount since it is highly correlated with net_amount. The final selected variables are as follows: 
+
+- channel_id
+- category_id
+- net_amount
+- line_discount
+- total_discount
+- markup
+- tax 
+- qty
+- line_amount
+- empl_item_detail_id
+
+```{r selection based on smoothplots}
+model_data_selection <- 
+  model_data %>% 
+    dplyr::select(channel_id, category_id, net_amount, line_discount, total_discount, markup, tax, qty, line_amount, empl_item_detail_id, flag, project_create_date)
+```
+ 
+## Feature scaling - normalization
+
+Since we have some numerical variables which have quite different ranges, we will normalize them in the following step at this point. Of course, there are options to apply the normalization within the training of the model depending on the function. However, we do this as a central step to have the comparable basis. An optimization for the gradient descent based algorithms (e.g. logistic regression) should already be done at this point. For the tree-based algorithms (e.g. random forest) this optimization has no influence; they are invariant to the scale of the features. The result after normalization looks like this, for example.
+
+```{r feature scaling - normalizaion}
+#change data type flag to factor
+model_data <- 
+  model_data_selection %>% 
+  mutate(flag = as.factor(flag))
+
+# normalize the numerical data
+model_data_norm.pre <- 
+  model_data %>% 
+  dplyr::select(-flag) %>% 
+  preProcess(method = "range")
+
+# get normalized values
+model_data_norm <- predict(model_data_norm.pre, model_data)
+
+# remove duplicate values
+model_data_norm <- model_data_norm %>% distinct()
+
+# remove temp variables
+rm(model_data_norm.pre)
+
+# show normalized numerical data
+model_data_norm %>% 
+  dplyr::select(-project_create_date, -flag) %>% 
+  head(10) %>% 
+  pander(split.tables = 100, style = "rmarkdown", caption = "normalized data")
+```
+
+## Feature selection
+
+We examine the near zero variation of the variables to check the potential reduction for the variable list. The analysis shows that there is a total of six variables that have a near zero variation. These we will be removed for the next steps.
+
+```{r feature selection - near zero variation analysis}
+#near zero variation analysis
+nzv <- 
+  model_data_norm %>% 
+  dplyr::select(-flag, -project_create_date) %>% 
+  nearZeroVar(saveMetrics = TRUE, names = TRUE) 
+
+nzv %>% 
+  dplyr::filter(nzv == TRUE) %>% 
+  pander()
+
+model_data_norm <- 
+  model_data_norm %>% dplyr::select(-net_amount, -line_discount, -total_discount, -markup, -tax)
+```
+
+## Data splitting
+
+The normalized data set is split into a train and a test set. Finally, we want to predict implausible projects for the year 2021 using the validation set. At first, we use the time split for 2020 and earlier projects by project_create_date, then we split the data from 2015 to 2020 based on the createDateParition function and take 90% for train data and 10% for test data. In total, we have 5 predictors in the model and two levels for the label flag to be predicted.
+
+```{r modeling data setup}
+# define train data set (all projects before 2021)
+base <- 
+  model_data_norm %>% 
+  filter(project_create_date < '2021-01-01') %>% 
+    dplyr::select(-project_create_date)
+```
+
+```{r data splitting}
+# split base data set in train and test set
+test_index <- createDataPartition(y = base$flag, p = 0.1, times = 1, list = FALSE)
+train <- base[-test_index,]
+test <- base[test_index,]
+
+# define validation data set
+validation <- 
+  model_data_norm %>% 
+  filter(project_create_date >= '2021-01-01') %>% 
+  dplyr::select(-project_create_date)
+```
+
+```{r stop timer modeling approach}
+#Stop timer
+mytimer$stop("Modeling approach")
+```
+
+\newpage
+# Train and compare different models
+
+```{r start timer train and compare models}
+#Start timer
+mytimer$start("Train and compare different models")
+```
+
+In terms of cross validation we use a 10-fold cross validation procedure.
+
+```{r cross validation parameters}
+# Cross validation 
+trControl <- trainControl(method = "cv", number = 10)
+```
+
+## Model 1 - Naive bayes
+
+First, we start with the Naive Bayes approach, which belongs to the family of simple "probabilistic classifiers" based on the application of Bayes theorem with strong assumptions on independence between features. 
+
+```{r start timer naive bayes}
+#Start timer
+mytimer$start("Naive bayes")
+```
+
+```{r define data frame for results}
+# define data frame for results
+results <- data.frame(Model = integer(), 
+                      Approach = character(), 
+                      Accuracy = numeric(),
+                      Sensitivity = numeric(),
+                      Specificity = numeric(),
+                      Precision = numeric(),
+                      Recall = numeric(), 
+                      F1 = numeric())
+```
+
+```{r model 1 - naive bayes, fig.width=5}
+############## Naive bayes 1 ##############
+# train model 
+model_nb <- naiveBayes(flag ~ ., data = train, trControl = trcontrol)
+
+# predict values
+test$pred_nb <- predict(model_nb, test)
+
+# create confusion matrix 
+cm_nb <- confusionMatrix(test$flag, test$pred_nb)
+
+# gather results
+temp_model_accuracy <- cm_nb$overall["Accuracy"]
+temp_model_sensitivity <- cm_nb$byClass["Sensitivity"]
+temp_model_specificity <- cm_nb$byClass["Specificity"]
+temp_model_precision <- cm_nb$byClass["Precision"]
+temp_model_recall <- cm_nb$byClass["Recall"]
+temp_model_f1 <- cm_nb$byClass["F1"]
+
+results <- bind_rows(results, 
+                          data.frame(Model = 1,
+                                     Approach = "Naive Bayes",
+                                     Accuracy = temp_model_accuracy,
+                                     Sensitivity = temp_model_sensitivity, 
+                                     Specificity = temp_model_specificity,
+                                     Precision = temp_model_precision, 
+                                     Recall = temp_model_recall,
+                                     F1 = temp_model_f1
+                          ))
+
+results %>% as.tbl() %>% as.data.frame() %>% 
+  pander(split.tables = 130, style = "rmarkdown")
+```
+
+The results show that we have an accuracy of `r temp_model_accuracy` which is the first value to compare the following models with. We can see that in particular plausible projects are predicted quite good. However, the algorithm has a low specificity `r temp_model_specificity`), a high precision of `r temp_model_precision` and a solid F1 value (`r temp_model_f1`).
+
+In many cases the model predicts an implausible project where it is plausible in real. From a business perspective more problematic are those cases that are implausible or potentially wrong, but not detected by the model. This will have consequences for the business since dissatisfied customers will call the company and complain about it. The following plot shows the total numbers in the confusion matrix.
+
+```{r model 1 - naive bayes plot}
+# plot the confusion matrix results
+table <- data.frame(cm_nb$table)
+
+plotTable <- table %>%
+  mutate(goodbad = ifelse(table$Prediction == table$Reference, "good", "bad")) %>%
+  group_by(Reference) %>%
+  mutate(prop = Freq/sum(Freq))
+
+cm_nb_plot <- 
+  ggplot(data = plotTable, mapping = aes(x = Reference, y = Prediction, fill = goodbad, alpha = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, fontface  = "bold", alpha = 1) +
+  scale_fill_manual(values = c(good = "green", bad = "red")) +
+  theme_bw() +
+  xlim(rev(levels(table$Reference))) + 
+  labs(title = "confusion matrix - naive bayes") + 
+  theme(text = element_text(size=global_size))
+cm_nb_plot
+```
+
+```{r stop timer naive bayes}
+#Stop timer
+mytimer$stop("Naive bayes")
+```
+
+## Model 2- Logistic regression
+
+We continue with a logistic regression model (used for classification) that is created based on the train data. Since this is a binomial question (i.e. classification with two outcomes), we use family = "binomial": the model should predict whether project data is plausible or not.
+
+```{r start timer logistic regression}
+#Start timer
+mytimer$start("Logistic regression")
+```
+
+```{r model 2a - logistic regression}
+# train model
+model_logm <- glm(flag ~ ., data = train, family = "binomial")
+
+# cross validation
+model_logm_cv <- cv.glm(train, model_logm, K = 10)
+
+# predict values on test set
+predict_model_logm_prob <- predict(model_logm, test, type = "response")
+
+# changing probabilities
+test$pred_logm <- as.factor(ifelse(predict_model_logm_prob > 0.5, 1, 0))
+
+# create the confusion matrix
+cm_logm <- confusionMatrix(test$flag, test$pred_logm)
+
+# gather results
+temp_model_accuracy <- cm_logm$overall["Accuracy"]
+temp_model_sensitivity <- cm_logm$byClass["Sensitivity"]
+temp_model_specificity <- cm_logm$byClass["Specificity"]
+temp_model_precision <- cm_logm$byClass["Precision"]
+temp_model_recall <- cm_logm$byClass["Recall"]
+temp_model_f1 <- cm_logm$byClass["F1"]
+
+results <- bind_rows(results, 
+                          data.frame(Model = 2,
+                                     Approach = "Logistic Regression",
+                                     Accuracy = temp_model_accuracy,
+                                     Sensitivity = temp_model_sensitivity, 
+                                     Specificity = temp_model_specificity,
+                                     Precision = temp_model_precision, 
+                                     Recall = temp_model_recall,
+                                     F1 = temp_model_f1
+                          ))
+
+results %>% as.tbl() %>% as.data.frame() %>% 
+  pander(split.tables = 130, style = "rmarkdown")
+
+# calculate probs for train model, show ROC curve and calculate auc 
+predict_model_logm_prob <- predict(model_logm, test, type = "response")
+
+# calculate ROC
+ROC <- roc(test$flag, predict_model_logm_prob)
+
+#calculate auc value
+auc_logm <- auc(ROC)
+```
+
+The results show that we have an accuracy of `r temp_model_accuracy` which is slightly better compared to the Naive Bayes model. It seems to be a better fit. The specificity is better (`r temp_model_specificity`), the sensitivity lower (`r temp_model_sensitivity`). Interestingly, the precision is almost 1 and the F1 value also increased (`r temp_model_f1`). 
+
+In addition, if we have a look on the ROC curve and calculate the area under the curve (auc) we see that we are a bit better compared to making predictions at random with a value of `r auc_logm`.
+
+```{r plot ROC curve}
+# plot ROC curve
+plot(ROC, col = "blue") + 
+  theme(text = element_text(size=global_size))
+```
+
+Let us have a look on the confusion matrix. It can be seen that many cases are recognized correctly, as the accuracy already shows. Particularly outstanding are the projects that are plausible and are also recognized as plausible. Critical are the projects that are incorrect, but are marked as plausible. However, compared to the Naive Bayes model we reduced those cases to under 200 which really is a benefit of this model. On the other hand, we can see that the number of false positives increased. This means that we have more cases that are correct in real but flagged as implausible and results in more manual re-working of the projects and invoices. A significantly higher volume of manual testings would be required in the company. Although, we would like to have a balanced model, we estimate the damage based on reputation higher compared to manual re-work. 
+
+```{r model 2a - logistic regression plot}
+# create data frame
+table <- data.frame(cm_logm$table)
+
+# preparations
+plotTable <- table %>%
+  mutate(good_bad = ifelse(table$Prediction == table$Reference, "good", "bad")) %>%
+  group_by(Reference) %>%
+  mutate(prop = Freq/sum(Freq))
+
+# plot confusion matrix
+cm_logm_plot <- 
+  ggplot(data = plotTable, mapping = aes(x = Reference, y = Prediction, fill = good_bad, alpha = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, fontface = "bold", alpha = 1) +
+  scale_fill_manual(values = c(good = "green", bad = "red")) +
+  theme_bw() +
+  xlim(rev(levels(table$Reference))) + 
+  labs(title = "confusion matrix - logistic regression") + 
+  theme(text = element_text(size=global_size))
+cm_logm_plot
+```
+
+
+Before we continue we want to apply another approach to the logistic model: a step-wise extension of the model. For this we first create the null model and on the other hand define the maximum model with all predictors. Subsequently, the approach will extend the model step by step in the following order: line_amount, qty, empl_item_detail_id, category_id, and channel_id. Finally, we consider the ROC and the auc for the resulting best model. 
+
+```{r model 2b - logistic regression - stepwise regression model, include=FALSE}
+# specify a null model with no predictors
+null_model <- glm(flag ~ 1, data = train, family = "binomial")
+
+# Specify the full model using all of the potential predictors
+full_model <- glm(flag ~ ., data = train, family = "binomial")
+
+# Use a forward stepwise algorithm to build a parsimonious model
+step_model <- step(null_model, scope = list(lower = null_model, upper = full_model), direction = "forward")
+
+# Estimate the stepwise flag probability
+step_prob <- predict(step_model, test, type = "response")
+```
+
+```{r model 2b - logistic regression - stepwise regression model outcomes}
+# Plot the ROC of the stepwise model
+ROC <- roc(test$flag, step_prob)
+
+#calculate auc value
+auc_logm2 <- auc(ROC)
+```
+
+```{r model 2b - logistic regression - stepwise regression model plo}
+plot(ROC, col = "red") + 
+  theme(text = element_text(size=global_size))
+```
+
+We find that the step-wise approach takes in all predictors, same as our first logistic model. Therefore, we see that we have the same auc value of `r auc_logm2`. This means we have already obtained a relatively robust model in the first logistic regression model. Thus, we neglect to plot the same confusion matrix here again.
+
+```{r stop timer logistic regression}
+#Stop timer
+mytimer$stop("Logistic regression")
+```
+
+## Model 3 - Decision tree
+
+As a first step in terms of tree-based algorithms we take the decision tree as classifier using the rpart package. The results are as follows:
+
+```{r model 3 - decision tree}
+# train model
+model_dt <- rpart(flag ~ ., data = train, method = "class", control = rpart.control(cp = 0))
+
+# predict values
+test$pred_dt <- predict(model_dt, test, type = "class")
+
+# create the confusion matrix
+cm_dt <- confusionMatrix(test$flag, test$pred_dt)
+
+# gather results
+temp_model_accuracy <- cm_dt$overall["Accuracy"]
+temp_model_sensitivity <- cm_dt$byClass["Sensitivity"]
+temp_model_specificity <- cm_dt$byClass["Specificity"]
+temp_model_precision <- cm_dt$byClass["Precision"]
+temp_model_recall <- cm_dt$byClass["Recall"]
+temp_model_f1 <- cm_dt$byClass["F1"]
+
+results <- bind_rows(results, 
+                          data.frame(Model = 3,
+                                     Approach = "Decision Tree",
+                                     Accuracy = temp_model_accuracy,
+                                     Sensitivity = temp_model_sensitivity, 
+                                     Specificity = temp_model_specificity,
+                                     Precision = temp_model_precision, 
+                                     Recall = temp_model_recall,
+                                     F1 = temp_model_f1
+                          ))
+
+results %>% as.tbl() %>% as.data.frame() %>% 
+  pander(split.tables = 130, style = "rmarkdown")
+```
+
+The accuracy is higher than for the models before with a value of `r temp_model_accuracy`, but if we look at the false positive and false negative values, we see that especially the false negatives have increased significantly. The model now more often gives the impression that the projects are actually correct, although this is not the case. In this respect, the logistic model still has an advantage. But since we put our focus on the reputational damage, we are happy to see that the true negative have increased well. As well, the number of false negative decreased. 
+
+```{r model 3 - decision tree plot}
+# create data frame
+table <- data.frame(cm_dt$table)
+
+# preparations
+plotTable <- table %>%
+  mutate(good_bad = ifelse(table$Prediction == table$Reference, "good", "bad")) %>%
+  group_by(Reference) %>%
+  mutate(prop = Freq/sum(Freq))
+
+# plot confusion matrix
+cm_dt_plot <- 
+  ggplot(data = plotTable, mapping = aes(x = Reference, y = Prediction, fill = good_bad, alpha = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, fontface = "bold", alpha = 1) +
+  scale_fill_manual(values = c(good = "green", bad = "red")) +
+  theme_bw() +
+  xlim(rev(levels(table$Reference))) + 
+  labs(title = "confusion matrix - decision tree") + 
+  theme(text = element_text(size=global_size))
+cm_dt_plot
+```
+
+## Model 4 - Random forest
+
+In this approach, we apply the random forest approach for this classification problem. To get a first indication quickly despite the size of the data set, we use the ranger package. We find the results here: 
+
+```{r start timer random forest}
+#Start timer
+mytimer$start("Random forest")
+```
+
+```{r model 4 - random forest, include=FALSE}
+# train model
+model_rf <- ranger(flag ~ ., data = train, importance = "impurity")
+```
+
+```{r model 4 - random forest results}
+# predict values
+predict_model_rf <- predict(model_rf, test)
+test$pred_rf <- predict_model_rf$predictions
+
+# create confusion matrix
+cm_rf <- confusionMatrix(test$flag, test$pred_rf)
+
+# gather results
+temp_model_accuracy <- cm_rf$overall["Accuracy"]
+temp_model_sensitivity <- cm_rf$byClass["Sensitivity"]
+temp_model_specificity <- cm_rf$byClass["Specificity"]
+temp_model_precision <- cm_rf$byClass["Precision"]
+temp_model_recall <- cm_rf$byClass["Recall"]
+temp_model_f1 <- cm_rf$byClass["F1"]
+
+results <- bind_rows(results, 
+                          data.frame(Model = 4,
+                                     Approach = "Random Forest",
+                                     Accuracy = temp_model_accuracy,
+                                     Sensitivity = temp_model_sensitivity, 
+                                     Specificity = temp_model_specificity,
+                                     Precision = temp_model_precision, 
+                                     Recall = temp_model_recall,
+                                     F1 = temp_model_f1
+                          ))
+
+results %>% as.tbl() %>% as.data.frame() %>% 
+  pander(split.tables = 130, style = "rmarkdown")
+```
+
+The random forest model provides the best result in terms of an overall accuracy value of `r temp_model_accuracy`. Although sensitivity has decreased a little compared to the decision tree model, specificity has increased again (`r temp_model_specificity`). Thus, also more implausible projects are predicted as implausible compared to the former models. However, if we look at the false negative values, we find that we are significantly higher compared to the logistic regression model. This model here is significantly better at identifying implausible projects.
+
+```{r model 4 - random forest plot}
+# plot the confusion matrix results
+table <- data.frame(cm_rf$table)
+
+plotTable <- table %>%
+  mutate(goodbad = ifelse(table$Prediction == table$Reference, "good", "bad")) %>%
+  group_by(Reference) %>%
+  mutate(prop = Freq/sum(Freq))
+
+cm_rf_plot <- 
+  ggplot(data = plotTable, mapping = aes(x = Reference, y = Prediction, fill = goodbad, alpha = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, fontface = "bold", alpha = 1) +
+  scale_fill_manual(values = c(good = "green", bad = "red")) +
+  theme_bw() +
+  xlim(rev(levels(table$Reference))) +
+ labs(title = "confusion matrix - random forest") + 
+  theme(text = element_text(size=global_size))
+cm_rf_plot
+```
+
+```{r stop timer random forest}
+#Stop timer
+mytimer$stop("Random forest")
+```
+
+We can also see that the predictors have different importance: line_amount, qty and empl_item_detail_id seem to have the highest importance values (i.e. Gini index). The importance of the variables shows the following table: 
+
+```{r model 4 - random forest importance}
+# show importance of predictors
+importance(model_rf) %>% 
+  as.data.frame() %>% 
+  pander()
+```
+
+## Model 5 - K-nearest neighbours 
+
+Although we tried to apply the k nearest neighbors model, this was not possible due to the conditions of the existing operating system. A run of 16 hours did not lead to any result. Therefore, we will refrain from taking a closer look at this model in the following.
+
+## Summary 
+
+Now that we have run the individual models, we will compare them with each other in terms of their results. 
+
+- Model 1 - Naive Bayes
+- Model 2 - Logistic Regression
+- Model 3 - Decision Tree
+- Model 4 - Random Forest 
+
+```{r, fig.width= 7, fig.height=6}
+# plot combined plots
+grid.arrange(cm_nb_plot, cm_logm_plot, cm_dt_plot, cm_rf_plot, nrow=2)
+
+# show all results
+results %>% as.tbl() %>% as.data.frame() %>% 
+  pander(split.tables = 130, style = "rmarkdown")
+```
+
+We see that the model 4 "Random Forest" has the best results in terms of overall accuracy in the confusion matrices, i.e. the missclass error is minimal for the models. In terms of specificity, the decision tree approach is somewhat better, which is especially evident in precision. Here, the logistic regression model is also clearly better. Finally however, it can be seen that the F1 value again speaks for the random forest approach. In view of the fact that the company primarily wants to identify projects that are implausible in order to ensure its reputation with customers, we focus on this aspect. In addition, care should also be taken to ensure that the number of false positive cases is as low as possible so that the internal manual effort is not too great. For this reason, the decision is made in favor of the two models decision tree and random forest. 
+
+```{r stop timer train and compare models}
+#Stop timer
+mytimer$stop("Train and compare different models")
+```
+
+\newpage
+# Model prediction 
+
+As defined in the last section, we now apply the two models decision tree and random forest to classify the projects from the year 2021 into plausible and implausible ones.
+
+```{r start timer model validation and results}
+#Start timer
+mytimer$start(" Model validation and results")
+```
+
+```{r model validation}
+# Predicting values 
+#set best value on cross-validation of model x
+
+# remove flag variable (which is 0) on validation set
+validation <- 
+  validation %>% 
+  dplyr::select(-flag)
+
+# predict implausible projects 2021 - decision tree
+validation_predicitions_dt <- predict(model_dt, validation)#, type = "response")
+
+validation_flagged_dt_mean <- mean(validation_predicitions_dt[,2] > 0.5) # flagged projects
+validation_flagged_dt_sum <- sum(validation_predicitions_dt[,2] > 0.5) # flagged projects
+
+# predict implausible projects 2021 - random forest
+validation_predicitions_rf <- predict(model_rf, validation)#, type = "response")
+
+validation_flagged_rf_mean <- mean(validation_predicitions_rf$predictions == 1) # flagged projects
+validation_flagged_rf_sum <- sum(validation_predicitions_rf$predictions == 1) # flagged projects
+```
+
+- Decision tree: In the case of the decision tree model, we find that we get `r validation_flagged_dt_sum` flagged projects (i.e. `r validation_flagged_dt_mean` percent). We are thus below the percentage of about 16% for the projects from 2015 to 2020. This seems to indicate that we are not subject to overfitting.
+
+- Random forest: In the result of the validation, we can see that from the `r validation %>% nrow()` projects in 2021 exactly  `r validation_flagged_rf_sum` will be flagged as implausible ones, i.e. about `r validation_flagged_rf_mean` percent of the projects. This is lower than the percentage for the decision tree model. 
+
+```{r stop timer model validation and results}
+#Stop timer
+mytimer$stop(" Model validation and results")
+```
+
+# Conclusion
+
+```{r start timer conclusion}
+#Start timer
+mytimer$start("Conclusion")
+```
+
+Overall, we can see that we can make a good prediction for the projects in 2021 with our two models. The danger of overfitting probably does not exist, as the first results show. Now the use of the models in practice must show whether they pay off and can help identify implausible projects and invoices. In addition, it must become clear whether the number of false positives or false negatives are indeed incorrect in order to better assess the consequences: the internal effort required to manually check correct project information or the unforeseen reputational damage that the company could suffer. 
+
+The limitations of this work are as follows: First, the predictions were made only on the basis of a few predictors. In reality, additional variables, such as information from orders, customer complaints, and evidence of manual rework, should be considered to extend the models. This would allow them to provide even better predictive content. In addition, only a subset of possible models was applied. The same applies to the composition of different combinations of predictors. 
+
+For future work, the following considerations could be applied: On the one hand, the training data could be extended. In addition, several classification models should be applied. It could also help to proceed in the sense of unsupervised models, i.e. to try to give the algorithm the possibility to find out by itself whether and if so which project information is implausible. Finally, a more comprehensive database would also help to give the model more predictive power. 
+
+```{r stop timer conclusion}
+#Stop timer
+mytimer$stop("Conclusion")
+```
+
+# Appendix 
+
+Please find the summary for the time elapsed for the different steps in the table below.
+
+```{r appendix}
+#Get timer summary
+getTimer(mytimer) %>% 
+   mutate(timeElapsed_min = round(as.numeric(timeElapsed/60),2)) %>%
+   dplyr::select(event, start, end, timeElapsed_min) %>% 
+   pander(split.tables = 120, style = "rmarkdown")
+```
